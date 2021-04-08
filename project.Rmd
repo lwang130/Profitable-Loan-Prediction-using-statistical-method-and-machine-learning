@@ -1,0 +1,425 @@
+---
+title: "Big Data Analysis Final Project"
+author: "Linchen Wang"
+date: "12/6/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Case Description
+Chess Bank recently received 250 loan applications. As Chess’s chief data analyst, your job is to propose a list of applicants that the bank should give loans to, with the goal of maximizing total profit from these loans.
+
+The “application2020.csv” file contains information of these applications, including loan amount and personal characteristics such as income, credit score, age, and education level. From the bank’s administrative records, you have pulled similar data from 250 historical loan applications
+and their payment information, contained in the “application2019.csv” file. The next step is to learn the relationship between individual characteristics and loan payment behavior from the 2019 applicants, and predict payments for the 2020 applicants.
+
+The following variables are available for the applications:
+• ID - A unique identification number that the bank assigned to each applicant
+• NAME - Loan applicant’s first and last name
+• SSN - (format: XXX-XXX-XXX) Loan applicant’s Social Security Number
+• DATE - (format: MMDDYYYY) Date when the loan application was submitted
+• LOAN AMT - Loan amount applied for (in dollars)
+• AMT DUE - Loan amount plus interest to be paid (in dollars)
+• STATECODE - Loan applicant’s state of residence
+• AGE - Loan applicant’s age in years when the application was submitted
+• MARRIED - Loan applicant’s marital status when the application was submitted (1 if married; 0 otherwise)
+• EDUC - Loan applicant’s self reported education attainment (1 if less than high school, 2 if high school graduates, 3 if college graduates)
+• W2INC M1 - Loan applicant’s wage income 1 year ago obtained from W-2 Form (in dollars)
+• W2INC M2 - Loan applicant’s wage income 2 years ago obtained from W-2 Form (in dollars)
+• TAXDEPENDENT - Loan applicant’s number of tax dependent in the previous year
+• CREDITSCORE - Loan applicant’s credit score
+• ASSET - Loan applicant’s self reported total asset (in dollars)
+• DEBT - Loan applicant’s self reported total debt (in dollars)
+• UNEMPRATE - Unemployment rate in the loan applicant’s state of residence when the application was submitted (in %)
+• AVG HOMEPRICE - Average home sale price in the loan applicant’s state of residence
+
+For the sample of historical applicants, you also observe
+• AMT PAID - The amount of money paid back by the application (in dollars)
+
+There are several simplifications we will make in this exercise:
+1. Loan amount has already incorporated costs of loan so that the difference between amount paid and the loan amount is the bank’s profit. In other words, the bank does not lose money as long as the applicant pays back the loan amount. Profit is positive if the applicant pays back the loan amount plus some interest. Profit is maximum if the applicant pays back the full “AMOUNT DUE”
+2. The bank is not constrained by how much loans it can issue in total. In other words, loans should be given to all applicants whose predicted payment is larger than the loan amount
+3. Payment amount (i.e. the AMT PAID variable) is calculated as present value of all period installments. In other words, you don’t have to consider value of early payments.
+
+# Preprocessing the Data
+```{r}
+# Load packages as needed
+library(tidyverse)
+library(randomForest)
+library(rpart.plot)
+library(boot)
+library(glmnet)
+library(boot)
+library(gbm)
+library(rpart)
+library(chron)
+library(knitr)
+
+# Import the data
+loan_data <- read_csv("application2019.csv", col_types = cols())
+
+# Explore the data
+head(loan_data)
+names(loan_data) # check the variable names
+sum(duplicated(select(loan_data, id))) == 0 # check if there are duplicate loans
+nrow(loan_data)# check the number of loans
+
+
+# Generate variables
+#loan_data <- mutate(loan_data, dti = if_else(W2inc_m1 == 0 | debt == 0, 0, debt/W2inc_m1)) # Add variable: dti (debt to income ratio)
+#loan_data <- mutate(loan_data, profit_amt = amt_paid - loan_amt) # Add variable: profit_amt
+#loan_data <- mutate(loan_data, profit_binary = as.numeric(amt_paid - loan_amt > 0))# Add variable: profit_binary
+
+# Clean data with no missing values in any predictors 
+loan_data$statecode <- factor(loan_data$statecode)
+loan_data <- loan_data %>% select(-id, -name, -SSN, -date) %>% filter(complete.cases(.))
+
+# Split in the training and testing data sets
+set.seed(1)
+train_data <- sample_frac(loan_data,  0.8)
+test_data <- setdiff(loan_data, train_data)
+
+# Create the formula
+f <- formula(amt_paid ~ . )
+```
+# Applying Predictive Models - linear regression, Lasso, and Decision Trees
+
+# Linear regression and Lasso
+```{r}
+# Multiple linear regression
+lm <- glm(f, data = train_data)
+mse_lm <- mean((predict(lm, newdata = test_data) - test_data$amt_paid)^2)
+
+# LASSO regression
+lasso <- cv.glmnet(x = model.matrix(f, data = train_data), y = train_data$amt_paid)
+mse_lasso <- mean((predict(lasso, newx = model.matrix(f, data = test_data), s = min(lasso$lambda)) - test_data$amt_paid)^2) # Lasso model, using the value of lambda that gives minimum mean cross-validated error
+```
+
+# Trees
+```{r}
+# Decision Tree
+tree <- rpart(f, data = train_data, cp = 0.001, parms = list(loss = matrix(c(0, 10, 1, 0), ncol = 2)))
+mse_tree <- mean((predict(tree, newdata = test_data) - test_data$amt_paid)^2)
+prp(tree, extra = 1, box.palette = "auto")
+
+```
+
+# Imroving the Model - Cross Validation and Variable Selection
+
+# Variable Selection
+```{r}
+#Variable Selection - Forward Stepwise Selection 
+
+# Function to calculate CV MSE for any formula f
+# Default for cv.glm: K=n (LOOCV)
+cv_fun <- function(f) {
+  glmfit <- glm(f, data = loan_data)
+  cv.glm(data = loan_data, glmfit)$delta[1]
+}
+
+#k = 0
+f1_1 <- formula(amt_paid ~ creditscore)
+f1_2 <- formula(amt_paid ~ W2inc_m1)
+f1_3 <- formula(amt_paid ~ loan_amt)
+f1_4 <- formula(amt_paid ~ W2inc_m2)
+f1_5 <- formula(amt_paid ~ asset)
+f1_6 <- formula(amt_paid ~ statecode)
+f1_7 <- formula(amt_paid ~ avg_homeprice)
+f1_8 <- formula(amt_paid ~ age)
+f1_9 <- formula(amt_paid ~ unemprate)
+f1_10 <- formula(amt_paid ~ educ)
+f1_11 <- formula(amt_paid ~ debt)
+f1_12 <- formula(amt_paid ~ taxdependent)
+f1_13 <- formula(amt_paid ~ married)
+f1_14 <- formula(amt_paid ~ amt_due)
+formulas1 <- list(f1_1, f1_2, f1_3, f1_4, f1_5, f1_6, f1_7, f1_8, f1_9, f1_10, f1_11, f1_12, f1_13, f1_14)
+formulas1_cv <- vector("numeric", length(formulas1))
+for (i in 1:length(formulas1)) {
+  formulas1_cv[[i]] <- cv_fun(formulas1[[i]])
+}
+M1 <- formulas1[[which.min(formulas1_cv)]]
+M1
+```
+```{r}
+#k = 1
+f2_1 <- formula(amt_paid ~ W2inc_m1 + creditscore)
+f2_2 <- formula(amt_paid ~ W2inc_m1 + loan_amt)
+f2_3 <- formula(amt_paid ~ W2inc_m1 + W2inc_m2)
+f2_4 <- formula(amt_paid ~ W2inc_m1 + asset)
+f2_5 <- formula(amt_paid ~ W2inc_m1 + statecode)
+f2_6 <- formula(amt_paid ~ W2inc_m1 + avg_homeprice)
+f2_7 <- formula(amt_paid ~ W2inc_m1 + age)
+f2_8 <- formula(amt_paid ~ W2inc_m1 + unemprate)
+f2_9 <- formula(amt_paid ~ W2inc_m1 + educ)
+f2_10 <- formula(amt_paid ~ W2inc_m1 + debt)
+f2_11 <- formula(amt_paid ~ W2inc_m1 + taxdependent)
+f2_12 <- formula(amt_paid ~ W2inc_m1 + married)
+f2_13 <- formula(amt_paid ~ W2inc_m1 + amt_due)
+formulas2 <- list(f2_1, f2_2, f2_3, f2_4, f2_5, f2_6, f2_7, f2_8, f2_9, f2_10, f2_11, f2_12, f2_13)
+formulas2_cv <- vector("numeric", length(formulas2))
+for (i in 1:length(formulas2)) {
+  formulas2_cv[[i]] <- cv_fun(formulas2[[i]])
+}
+M2 <- formulas2[[which.min(formulas2_cv)]]
+M2
+```
+```{r}
+#k = 2
+f3_1 <- formula(amt_paid ~ W2inc_m1 + statecode + creditscore)
+f3_2 <- formula(amt_paid ~ W2inc_m1 + statecode + loan_amt)
+f3_3 <- formula(amt_paid ~ W2inc_m1 + statecode + W2inc_m2)
+f3_4 <- formula(amt_paid ~ W2inc_m1 + statecode + asset)
+f3_5 <- formula(amt_paid ~ W2inc_m1 + statecode + amt_due)
+f3_6 <- formula(amt_paid ~ W2inc_m1 + statecode + avg_homeprice)
+f3_7 <- formula(amt_paid ~ W2inc_m1 + statecode + age)
+f3_8 <- formula(amt_paid ~ W2inc_m1 + statecode + unemprate)
+f3_9 <- formula(amt_paid ~ W2inc_m1 + statecode + educ)
+f3_10 <- formula(amt_paid ~ W2inc_m1 + statecode + debt)
+f3_11 <- formula(amt_paid ~ W2inc_m1+ statecode + taxdependent)
+f3_12 <- formula(amt_paid ~ W2inc_m1 + statecode + married)
+formulas3 <- list(f3_1, f3_2, f3_3, f3_4, f3_5, f3_6, f3_7, f3_8, f3_9, f3_10, f3_11, f3_12)
+formulas3_cv <- vector("numeric", length(formulas3))
+for (i in 1:length(formulas3)) {
+  formulas3_cv[[i]] <- cv_fun(formulas3[[i]])
+}
+M3 <- formulas3[[which.min(formulas3_cv)]]
+M3
+```
+```{r}
+#k = 3
+f4_1 <- formula(amt_paid ~ W2inc_m1 + age + statecode + creditscore)
+f4_2 <- formula(amt_paid ~ W2inc_m1 + age + statecode + loan_amt)
+f4_3 <- formula(amt_paid ~ W2inc_m1 + age + statecode + W2inc_m2)
+f4_4 <- formula(amt_paid ~ W2inc_m1 + age + statecode + asset)
+f4_5 <- formula(amt_paid ~ W2inc_m1 + age + statecode + educ)
+f4_6 <- formula(amt_paid ~ W2inc_m1 + age + statecode + avg_homeprice)
+f4_7 <- formula(amt_paid ~ W2inc_m1 + age + statecode + amt_due)
+f4_8 <- formula(amt_paid ~ W2inc_m1 + age + statecode + unemprate)
+f4_9 <- formula(amt_paid ~ W2inc_m1 + age + statecode + married)
+f4_10 <- formula(amt_paid ~ W2inc_m1 + age + statecode + debt)
+f4_11 <- formula(amt_paid ~ W2inc_m1 + age + statecode + taxdependent)
+formulas4 <- list(f4_1, f4_2, f4_3, f4_4, f4_5, f4_6, f4_7, f4_8, f4_9, f4_10, f4_11)
+formulas4_cv <- vector("numeric", length(formulas4))
+for (i in 1:length(formulas4)) {
+  formulas4_cv[[i]] <- cv_fun(formulas4[[i]])
+}
+M4 <- formulas4[[which.min(formulas4_cv)]]
+M4
+```
+```{r}
+#k = 4
+f5_1 <- formula(amt_paid ~ W2inc_m1 + creditscore + statecode + age + amt_due)
+f5_2 <- formula(amt_paid ~ W2inc_m1 + creditscore + statecode + age + loan_amt)
+f5_3 <- formula(amt_paid ~ W2inc_m1 + creditscore + statecode + age + W2inc_m2)
+f5_4 <- formula(amt_paid ~ W2inc_m1 + creditscore + statecode + age + asset)
+f5_5 <- formula(amt_paid ~ W2inc_m1 + creditscore + statecode + age + educ)
+f5_6 <- formula(amt_paid ~ W2inc_m1 + creditscore + statecode + age + avg_homeprice)
+f5_7 <- formula(amt_paid ~ W2inc_m1 + creditscore + statecode + age + married)
+f5_8 <- formula(amt_paid ~ W2inc_m1 + creditscore + statecode + age + unemprate)
+f5_9 <- formula(amt_paid ~ W2inc_m1 + creditscore + statecode + age + taxdependent)
+f5_10 <- formula(amt_paid ~ W2inc_m1 + creditscore + statecode + age + debt)
+formulas5 <- list(f5_1, f5_2, f5_3, f5_4, f5_5, f5_6, f5_7, f5_8, f5_9, f5_10)
+formulas5_cv <- vector("numeric", length(formulas5))
+for (i in 1:length(formulas5)) {
+  formulas5_cv[[i]] <- cv_fun(formulas5[[i]])
+}
+M5 <- formulas5[[which.min(formulas5_cv)]]
+M5
+```
+```{r}
+#k = 5
+f6_1 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + taxdependent)
+f6_2 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + loan_amt)
+f6_3 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + W2inc_m2)
+f6_4 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + asset)
+f6_5 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + educ)
+f6_6 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + avg_homeprice)
+f6_7 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + married)
+f6_8 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate)
+f6_9 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + debt)
+formulas6 <- list(f6_1, f6_2, f6_3, f6_4, f6_5, f6_6, f6_7, f6_8, f6_9)
+formulas6_cv <- vector("numeric", length(formulas6))
+for (i in 1:length(formulas6)) {
+  formulas6_cv[[i]] <- cv_fun(formulas6[[i]])
+}
+M6 <- formulas6[[which.min(formulas6_cv)]]
+M6
+```
+```{r}
+#k = 6
+f7_1 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent)
+f7_2 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + loan_amt)
+f7_3 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + W2inc_m2)
+f7_4 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + asset)
+f7_5 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + educ)
+f7_6 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + avg_homeprice)
+f7_7 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + married)
+f7_8 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + debt)
+formulas7 <- list(f7_1, f7_2, f7_3, f7_4, f7_5, f7_6, f7_7, f7_8)
+formulas7_cv <- vector("numeric", length(formulas7))
+for (i in 1:length(formulas7)) {
+  formulas7_cv[[i]] <- cv_fun(formulas7[[i]])
+}
+M7 <- formulas7[[which.min(formulas7_cv)]]
+M7
+```
+```{r}
+#k = 7
+f8_1 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + debt)
+f8_2 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + loan_amt)
+f8_3 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + W2inc_m2)
+f8_4 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + asset)
+f8_5 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + educ)
+f8_6 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + avg_homeprice)
+f8_7 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + married)
+formulas8 <- list(f8_1, f8_2, f8_3, f8_4, f8_5, f8_6, f8_7)
+formulas8_cv <- vector("numeric", length(formulas8))
+for (i in 1:length(formulas8)) {
+  formulas8_cv[[i]] <- cv_fun(formulas8[[i]])
+}
+M8 <- formulas8[[which.min(formulas8_cv)]]
+M8
+```
+```{r}
+#k = 8
+f9_1 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + married + debt)
+f9_2 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + married + loan_amt)
+f9_3 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + married + W2inc_m2)
+f9_4 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + married + asset)
+f9_5 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + married + educ)
+f9_6 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + married + avg_homeprice)
+formulas9 <- list(f9_1, f9_2, f9_3, f9_4, f9_5, f9_6)
+formulas9_cv <- vector("numeric", length(formulas9))
+for (i in 1:length(formulas9)) {
+  formulas9_cv[[i]] <- cv_fun(formulas9[[i]])
+}
+M9 <- formulas9[[which.min(formulas9_cv)]]
+M9
+```
+```{r}
+#k = 9
+f10_1 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + married + W2inc_m2 + avg_homeprice)
+f10_2 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + married + W2inc_m2 + loan_amt)
+f10_3 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + married + W2inc_m2 + asset)
+f10_4 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + married + W2inc_m2 + debt)
+f10_5 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + married + W2inc_m2 + educ)
+formulas10 <- list(f10_1, f10_2, f10_3, f10_4, f10_5)
+formulas10_cv <- vector("numeric", length(formulas10))
+for (i in 1:length(formulas10)) {
+  formulas10_cv[[i]] <- cv_fun(formulas10[[i]])
+}
+M10 <- formulas10[[which.min(formulas10_cv)]]
+M10
+```
+```{r}
+#k = 10
+f11_1 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + married + educ + W2inc_m2 + asset)
+f11_2 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + married + educ + W2inc_m2 + loan_amt)
+f11_3 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + married + educ + W2inc_m2 + avg_homeprice)
+f11_4 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + married + educ + W2inc_m2 + debt)
+formulas11 <- list(f11_1, f11_2, f11_3, f11_4)
+formulas11_cv <- vector("numeric", length(formulas11))
+for (i in 1:length(formulas11)) {
+  formulas11_cv[[i]] <- cv_fun(formulas11[[i]])
+}
+M11 <- formulas11[[which.min(formulas11_cv)]]
+M11
+```
+```{r}
+#k = 11
+f12_1 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + married + educ + W2inc_m2 + asset + debt)
+f12_2 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + married + educ + W2inc_m2 + asset + loan_amt)
+f12_3 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + married + educ + W2inc_m2 + asset + avg_homeprice)
+formulas12 <- list(f12_1, f12_2, f12_3)
+formulas12_cv <- vector("numeric", length(formulas12))
+for (i in 1:length(formulas12)) {
+  formulas12_cv[[i]] <- cv_fun(formulas12[[i]])
+}
+M12 <- formulas12[[which.min(formulas12_cv)]]
+M12
+```
+```{r}
+#k = 12
+f13_1 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + married + asset + W2inc_m2 + loan_amt + educ + avg_homeprice)
+f13_2 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + married + asset + W2inc_m2 + loan_amt + educ + debt)
+formulas13 <- list(f13_1, f13_2)
+formulas13_cv <- vector("numeric", length(formulas13))
+for (i in 1:length(formulas13)) {
+  formulas13_cv[[i]] <- cv_fun(formulas13[[i]])
+}
+M13 <- formulas13[[which.min(formulas13_cv)]]
+M13
+```
+```{r}
+#k = 13
+f14_1 <- formula(amt_paid ~ W2inc_m1 + amt_due + statecode + age + creditscore + unemprate + taxdependent + married + asset + W2inc_m2 + loan_amt + debt + educ + avg_homeprice)
+formulas14 <- list(f14_1)
+formulas14_cv <- vector("numeric", length(formulas14))
+for (i in 1:length(formulas14)) {
+  formulas14_cv[[i]] <- cv_fun(formulas14[[i]])
+}
+M14 <- formulas14[[which.min(formulas14_cv)]]
+M14
+```
+```{r}
+#Select a single best model from among M0,...,Mp using cross validated prediction error, Cp (AIC), BIC, or adjusted R2.
+formulas <- list(M1, M2, M3, M4, M5, M6, M7, M8, M9, M10, M11, M12, M13, M14)
+formulas_cv <- vector("numeric", length(formulas))
+for (i in 1:length(formulas)) {
+  formulas_cv[[i]] <- cv_fun(formulas[[i]])
+}
+f2 <- formulas[[which.min(formulas_cv)]]
+f2
+```
+# Improved linear regression and Lasso
+```{r}
+# Multiple linear regression
+lm2 <- glm(f2, data = train_data)
+mse_lm2 <- mean((predict(lm2, newdata = test_data) - test_data$amt_paid)^2)
+
+# LASSO regression
+lasso2 <- cv.glmnet(x = model.matrix(f2, data = train_data), y = train_data$amt_paid)
+mse_lasso2 <- mean((predict(lasso2, newx = model.matrix(f2, data = test_data), s = min(lasso$lambda)) - test_data$amt_paid)^2) # Lasso model, using the value of lambda that gives minimum mean cross-validated error
+```
+
+# Imrove Decision Trees
+```{r}
+# Bagging
+bag <- randomForest(f, data = train_data, ntree = 1000, mtry = 14, importance = TRUE)
+mse_bag <- mean((predict(bag, test_data) - test_data$amt_paid)^2)
+varImpPlot(bag)
+
+# Random Forest
+rf <- randomForest(f, data = train_data, ntree = 1000, mtry = 2, importance = TRUE)
+mse_rf <- mean((predict(rf, test_data) - test_data$amt_paid)^2)
+varImpPlot(rf)
+
+# Boosting
+boost <- gbm(f, data = train_data, distribution = "gaussian", n.trees = 100, interaction.depth = 20)
+mse_boost <- mean((predict(boost, test_data) - test_data$amt_paid)^2)
+summary(boost)
+```
+
+# Conclusions
+```{r}
+# Results of MSE in table
+MSE = c(mse_lm, mse_lasso, mse_lm2, mse_lasso2, mse_tree, mse_bag, mse_rf, mse_boost)
+mymatrix <- matrix(MSE, nrow = 8, ncol = 1, byrow = FALSE)
+row.names(mymatrix) <- c("Linear Regression", "Linear Regression (new)", "LASSO","LASSO (new)", "Decision tree", "Bagging", "Random forest", "Boosting")
+kable(mymatrix, row.names = TRUE, col.names = c("MSE"))
+
+# Apply new Lasso Regression to 2020 data, calculate the Total Profit for 2020 loans
+loan_data_2020 <- read_csv("application2020.csv", col_types = cols())
+loan_data_2020 <- mutate(loan_data_2020, amt_paid = rep(0, nrow(loan_data_2020)))
+loan_data_2020 <- mutate(loan_data_2020, predicted_amt_paid = predict(lasso2, newx = model.matrix(f2, data = loan_data_2020), s = min(lasso2$lambda)), predicted_profit = predicted_amt_paid - loan_amt, profit = amt_due - loan_amt) 
+
+# Export the final approval applicants file
+loan_data_2020 <- mutate(loan_data_2020, approve = as.numeric(predicted_profit > 0)) #%>% select(id, name, approve)
+predicted_profit <- sum(loan_data_2020[which(loan_data_2020$approve == 1),]$profit)
+predicted_profit
+loan_data_2020 <- select(loan_data_2020, id, name, approve)
+write.csv(loan_data_2020, file = "Project_Result.csv", row.names = FALSE)
+```
+
